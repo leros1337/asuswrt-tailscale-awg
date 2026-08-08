@@ -12,4 +12,9 @@ if [ -x /opt/etc/tailscale/merlin-hooks.sh ]; then
 		echo "warning: could not install /jffs/scripts hooks (is jffs2_scripts enabled?)"
 fi
 
+# An upgrade runs the old package's prerm, which stops the daemon, and nothing
+# would start it again -- `opkg upgrade tailscale` would silently drop the VPN.
+# Starting here is a no-op when it is already running.
+[ -x /opt/etc/init.d/S60tailscaled ] && /opt/etc/init.d/S60tailscaled start
+
 exit 0

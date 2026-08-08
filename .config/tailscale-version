@@ -4,7 +4,7 @@ TAILSCALE_REPO=LiuTangLei/tailscale
 TAILSCALE_VERSION=1.102.2
 TAILSCALE_TAG=v1.102.2
 UPSTREAM_COMMIT=36f560220bfb381b2850ed7ed934e473b1958d86
-PKG_RELEASE=1
+PKG_RELEASE=2
 
 # Entware target architecture. Must match `opkg print-architecture` on the
 # router, or opkg will refuse to install the package.
