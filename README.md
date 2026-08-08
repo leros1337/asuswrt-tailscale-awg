@@ -130,13 +130,21 @@ tcp  0  0 127.0.0.1:8443    LISTEN
 tcp  0  0 192.168.1.1:8443  LISTEN     <- LAN only
 ```
 
-Use `tailscale serve` to proxy it from inside tailscaled:
+Use `tailscale serve` to proxy it from inside tailscaled. A **raw TCP forwarder** is the option that keeps working by IP:
+
+```sh
+tailscale serve --bg --tcp 8443 tcp://192.168.1.1:8443
+```
+
+Then `https://<tailnet-ip>:8443` works from any tailnet device, exactly as it does on the LAN — same self-signed certificate warning, because your browser is talking TLS straight to the router through the tunnel. Note the **`https://`**: port 8443 speaks TLS, and a plain `http://` request to it returns `ERR_EMPTY_RESPONSE`.
+
+The HTTP-proxy form is also available and gives you a clean name with no cert warning:
 
 ```sh
 tailscale serve --bg --http=80 https+insecure://192.168.1.1:8443
 ```
 
-Then open `http://<hostname>/` from any tailnet device. Plain HTTP is fine here — the traffic is inside the WireGuard tunnel. `https+insecure://` is required because the router's own certificate is self-signed.
+but it **routes on the Host header** — its config is keyed `<hostname>.<tailnet>.ts.net:80`, so requesting the bare IP matches no handler and returns `404 page not found`. Use the MagicDNS name with this one (`http://rt-be92u-2f80/`), which means the client needs `--accept-dns=true`. Plain HTTP is fine here — the traffic is inside the WireGuard tunnel. `https+insecure://` is required because the router's own certificate is self-signed.
 
 For `https://` with a real certificate, enable **HTTPS Certificates** at *login.tailscale.com/admin/dns* first, then:
 
@@ -144,7 +152,9 @@ For `https://` with a real certificate, enable **HTTPS Certificates** at *login.
 tailscale serve --bg --https=443 https+insecure://192.168.1.1:8443
 ```
 
-Without that setting the daemon logs `your Tailscale account does not support getting TLS certs` and the TLS handshake fails. Two client-side gotchas: `serve` routes on the Host header, so requesting the bare IP returns `404` — use the MagicDNS name; and the client needs `--accept-dns=true` to resolve that name. The serve config lives in `tailscaled.state`, so it survives reboots.
+Without that setting the daemon logs `your Tailscale account does not support getting TLS certs` and the TLS handshake fails.
+
+The serve config lives in `tailscaled.state`, so all of this survives reboots. `tailscale serve status` shows what is currently bound, and `tailscale serve --tcp=8443 off` removes a forwarder.
 
 ## DNS / MagicDNS
 
