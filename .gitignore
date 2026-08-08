@@ -1,0 +1,17 @@
+# build output
+/out/
+/src/
+
+# agentmemory MCP server state (created when the server runs with cwd = this repo)
+/data/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# secrets
+.env
+.env.*
+*.key
+key-build*

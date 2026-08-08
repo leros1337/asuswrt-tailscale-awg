@@ -1,0 +1,15 @@
+#!/bin/sh
+# Entware opkg postinst.
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+# No `install` binary on Merlin (firmware or Entware base) -- mkdir + chmod.
+mkdir -p /opt/var/lib/tailscale /opt/var/log
+chmod 0700 /opt/var/lib/tailscale
+chmod 0755 /opt/var/log /opt/etc/init.d/S60tailscaled
+
+if [ -x /opt/etc/tailscale/merlin-hooks.sh ]; then
+	/opt/etc/tailscale/merlin-hooks.sh install || \
+		echo "warning: could not install /jffs/scripts hooks (is jffs2_scripts enabled?)"
+fi
+
+exit 0

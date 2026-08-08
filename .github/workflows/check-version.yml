@@ -1,249 +1,81 @@
-name: Daily Tailscale Version Check
-
-permissions:
-  contents: read
+name: Check for a new Tailscale-AWG version
 
 on:
   schedule:
-    - cron: '0 4,8,18,22 * * *'
+    - cron: '0 4,16 * * *'
   workflow_dispatch:
-    inputs:
-      version_check_method:
-        description: 'Version check method to use'
-        type: choice
-        options:
-          - ghcr
-          - tag
-        default: 'ghcr'
-        required: true
 
-env:
-  REPO_SMALL: "LiuTangLei/openwrt-tailscale-awg"
-  REPO_SMALL_NAME: "openwrt-tailscale-awg"
-  REPO_SMALL_OWNER: "LiuTangLei"
+permissions:
+  contents: write
 
 jobs:
-  version-check:
-    name: Check Version Differences
+  check:
     runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.compare.outputs.should_build }}
-      selected_version: ${{ steps.compare.outputs.selected_version }}
-      check_method: ${{ steps.compare.outputs.check_method }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Load check method from .config/check-method
-        id: load-method
+      - name: Read current pin
+        id: pin
         run: |
-          # 优先使用 workflow_dispatch 输入，其次读取配置文件，最后默认 ghcr
-          if [ -n "${{ github.event.inputs.version_check_method }}" ]; then
-            method="${{ github.event.inputs.version_check_method }}"
-            echo "Using manually provided method: $method"
-          elif [ -f .config/check-method ]; then
-            method=$(cat .config/check-method | tr -d '[:space:]')
-            echo "Using method from .config/check-method: $method"
-          else
-            method="ghcr"
-            echo "Using default method: $method"
-          fi
+          . ./.config/tailscale-version
+          {
+            echo "repo=$TAILSCALE_REPO"
+            echo "current=$TAILSCALE_VERSION"
+          } >> "$GITHUB_OUTPUT"
 
-          # 输出给后续步骤使用
-          echo "method=$method" >> $GITHUB_OUTPUT
-
-      - name: Get GHCR stable version
-        id: get_ghcr
-        uses: actions/github-script@v6
-        env:
-          GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+      - name: Find the newest stable tag of the fork
+        id: latest
+        uses: actions/github-script@v7
         with:
           script: |
-            const token = process.env.GHCR_TOKEN;
-            const res = await fetch(
-              'https://api.github.com/orgs/tailscale/packages/container/tailscale/versions',
-              { headers: { 
-                  'Authorization': `Bearer ${token}`,
-                  'Accept': 'application/vnd.github.v3+json'
-                } 
-              }
-            );
-
-            if (!res.ok) {
-              const body = await res.text();
-              throw new Error(`GHCR API returned ${res.status}: ${body}`);
-            }
-
-            const versions = await res.json();
-
-            if (!Array.isArray(versions)) {
-              console.log('Unexpected API response:', JSON.stringify(versions).slice(0, 500));
-              throw new Error('GHCR API did not return an array. Token may be expired or lack read:packages scope.');
-            }
-
-            const latestStableObj = versions.find(v => {
-              const tags = v.metadata?.container?.tags || [];
-              return tags.includes('stable') && tags.includes('latest');
-            });
-
-            if (!latestStableObj) throw new Error('No version found with both stable and latest tags');
-
-            const versionTag = (latestStableObj.metadata.container.tags || [])
-              .filter(tag => tag !== 'latest' && tag !== 'stable')[0];
-
-            if (!versionTag) throw new Error('No version tag found');
-
-            console.log('Upstream latest stable version tag:', versionTag);
-            core.setOutput('stable_version', versionTag);
-
-      - name: Get latest tag from release
-        id: get_tag_release
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const { data: tags } = await github.rest.repos.listTags({
-              owner: 'LiuTangLei',
-              repo: 'tailscale',
-              per_page: 100
-            });
-
-            const stableTags = tags
-              .map(tag => tag.name)
-              .filter(name => /^v\d+\.\d+\.\d+$/.test(name));
-
-            stableTags.sort((a, b) => {
-              const parse = v => v.slice(1).split('.').map(Number);
-              const [a1, a2, a3] = parse(a);
-              const [b1, b2, b3] = parse(b);
-              return b1 - a1 || b2 - a2 || b3 - a3;
-            });
-
-            const latest = stableTags[0] || '';
-            core.setOutput('tag', latest);
-
-      - name: Get latest release tag from openwrt-tailscale
-        id: get_small
-        uses: actions/github-script@v6
-        with:
-          script: |
-            try {
-              const { data } = await github.rest.repos.getLatestRelease({
-                owner: '${{ env.REPO_SMALL_OWNER }}',
-                repo: '${{ env.REPO_SMALL_NAME }}'
+            const [owner, repo] = '${{ steps.pin.outputs.repo }}'.split('/');
+            const { data: tags } = await github.rest.repos.listTags({ owner, repo, per_page: 100 });
+            const stable = tags
+              .map(t => t.name)
+              .filter(n => /^v\d+\.\d+\.\d+$/.test(n))
+              .sort((a, b) => {
+                const p = v => v.slice(1).split('.').map(Number);
+                const [a1,a2,a3] = p(a), [b1,b2,b3] = p(b);
+                return b1-a1 || b2-a2 || b3-a3;
               });
-              core.setOutput('tag', data?.tag_name || '');
-            } catch (error) {
-              core.setOutput('tag', '');
-            }
+            if (!stable.length) throw new Error('no stable tags found');
+            core.setOutput('tag', stable[0]);
+            core.setOutput('version', stable[0].slice(1));
 
-      - name: Compare versions
-        id: compare
+      - name: Update the pin
+        id: bump
         run: |
-          check_method="${{ steps.load-method.outputs.method }}"
-          echo "Using version check method: $check_method"
-          
-          if [ "$check_method" = "ghcr" ]; then
-            echo "GHCR Upstream Version: ${{ steps.get_ghcr.outputs.stable_version }}"
-            echo "Local Version: ${{ steps.get_small.outputs.tag }}"
-            
-            if [ "${{ steps.get_ghcr.outputs.stable_version }}" != "${{ steps.get_small.outputs.tag }}" ]; then
-              echo "New version found in GHCR"
-              echo "should_build=true" >> ${GITHUB_OUTPUT}
-              echo "selected_version=${{ steps.get_ghcr.outputs.stable_version }}" >> ${GITHUB_OUTPUT}
-              echo "check_method=ghcr" >> ${GITHUB_OUTPUT}
-            else
-              echo "No new version found in GHCR"
-              echo "should_build=false" >> ${GITHUB_OUTPUT}
-            fi
-          else
-            echo "Tag Release Version: ${{ steps.get_tag_release.outputs.tag }}"
-            echo "Local Version: ${{ steps.get_small.outputs.tag }}"
-            
-            if [ "${{ steps.get_tag_release.outputs.tag }}" != "${{ steps.get_small.outputs.tag }}" ]; then
-              echo "New version found in tag release"
-              echo "should_build=true" >> ${GITHUB_OUTPUT}
-              echo "selected_version=${{ steps.get_tag_release.outputs.tag }}" >> ${GITHUB_OUTPUT}
-              echo "check_method=tag" >> ${GITHUB_OUTPUT}
-            else
-              echo "No new version found in tag release"
-              echo "should_build=false" >> ${GITHUB_OUTPUT}
-            fi
+          new="${{ steps.latest.outputs.version }}"
+          cur="${{ steps.pin.outputs.current }}"
+          if [ "$new" = "$cur" ]; then
+            echo "already at $cur"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          sha=$(git ls-remote "https://github.com/${{ steps.pin.outputs.repo }}.git" \
+                  "refs/tags/${{ steps.latest.outputs.tag }}" | cut -f1)
+          [ -n "$sha" ] || { echo "could not resolve tag commit" >&2; exit 1; }
+          sed -i \
+            -e "s/^TAILSCALE_VERSION=.*/TAILSCALE_VERSION=$new/" \
+            -e "s/^TAILSCALE_TAG=.*/TAILSCALE_TAG=${{ steps.latest.outputs.tag }}/" \
+            -e "s/^UPSTREAM_COMMIT=.*/UPSTREAM_COMMIT=$sha/" \
+            .config/tailscale-version
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-
-  trigger-build:
-    name: Trigger Build Workflow with Commit
-    permissions:
-      contents: write
-    needs: version-check
-    if: needs.version-check.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      ghcr_commit: ${{ steps.get_commit.outputs.commit }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get commit based on selected method
-        id: get_commit
+      - name: Commit
+        if: steps.bump.outputs.changed == 'true'
         run: |
-          check_method="${{ needs.version-check.outputs.check_method }}"
-          version="${{ needs.version-check.outputs.selected_version }}"
-          echo "Using method: $check_method with version: $version"
-          
-          if [ "$check_method" = "ghcr" ]; then
-            echo "Getting commit from GHCR version ${version}"
-            docker pull ghcr.io/tailscale/tailscale:${version}
-            commit=$(docker run --rm ghcr.io/tailscale/tailscale:${version} tailscale version | grep -oP 'tailscale commit: \K\w+')
-            if [ -n "$commit" ]; then
-              echo "Commit from GHCR: $commit"
-              echo "commit=$commit" >> $GITHUB_OUTPUT
-              echo "version=$version" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          else
-            echo "Getting commit from tag release $version"
-            git ls-remote https://github.com/LiuTangLei/tailscale.git refs/tags/${version} | cut -f1 > tag_commit.txt
-            commit=$(cat tag_commit.txt)
-            if [ -n "$commit" ]; then
-              echo "Commit from tag: $commit"
-              echo "commit=$commit" >> $GITHUB_OUTPUT
-              echo "version=$version" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-          fi
-          
-          echo "Failed to get commit using $check_method method"
-          exit 1
-          
-      - name: Update Makefile with new version and hash
-        id: update_makefile
-        run: |
-          RAW_VER="${{ steps.get_commit.outputs.version }}"
-          NEW_VER=$(echo "$RAW_VER" | sed 's/^v//')
-          NEW_COMMIT="${{ steps.get_commit.outputs.commit }}"
-          
-          SOURCE_URL="https://codeload.github.com/LiuTangLei/tailscale/tar.gz/v${NEW_VER}?"
-          echo "Downloading from $SOURCE_URL to calculate hash..."
-          NEW_HASH=$(curl -L "$SOURCE_URL" | sha256sum | awk '{print $1}')
-          echo "New Hash: $NEW_HASH"
-
-          sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$NEW_VER/" package/tailscale/Makefile
-          sed -i "s/^PKG_HASH:=.*/PKG_HASH:=$NEW_HASH/" package/tailscale/Makefile
-          sed -i "s/PKG_COMMIT:=.*/PKG_COMMIT:=$NEW_COMMIT/" package/tailscale/Makefile
-
-      - name: Commit and push changes
-        run: |
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git add package/tailscale/Makefile
-          git commit -m "chore: update tailscale to ${{ steps.get_commit.outputs.version}} (${{ steps.get_commit.outputs.commit }})" || true
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .config/tailscale-version
+          git commit -m "chore: update tailscale to v${{ steps.bump.outputs.version }} (${{ steps.bump.outputs.sha }})"
           git push origin main
 
-      - name: Trigger build workflow
-        uses: peter-evans/repository-dispatch@v4
+      - name: Trigger the build
+        if: steps.bump.outputs.changed == 'true'
+        uses: peter-evans/repository-dispatch@v3
         with:
-          event-type: build-tailscale
-          token: ${{ secrets.PAT_TOKEN }}
+          event-type: build-asuswrt
+          token: ${{ secrets.PAT_TOKEN || github.token }}

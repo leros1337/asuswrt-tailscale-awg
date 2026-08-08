@@ -1,0 +1,16 @@
+#!/bin/sh
+# Entware opkg postrm.
+#
+# /opt/var/lib/tailscale is intentionally left in place: it holds the node's
+# identity, and re-installing should not force a re-auth. install.sh's
+# `uninstall` asks separately before deleting it.
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+# Only strip the hooks on a real removal. During an upgrade opkg may run the
+# old package's postrm after the new files are already staged, and the init
+# script still being present is the signal that this is not a removal.
+if [ ! -x /opt/etc/init.d/S60tailscaled ] && [ -x /opt/etc/tailscale/merlin-hooks.sh ]; then
+	/opt/etc/tailscale/merlin-hooks.sh remove >/dev/null 2>&1
+fi
+
+exit 0

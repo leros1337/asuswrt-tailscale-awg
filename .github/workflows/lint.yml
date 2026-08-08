@@ -1,0 +1,60 @@
+name: Lint and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: shellcheck (POSIX sh)
+        run: |
+          # SC1091: sourced files (the version pin, the on-device conffile) are
+          # not resolvable from the linter's point of view.
+          shellcheck -s sh -e SC1091 install.sh build/build.sh build/mkipk.sh build/mkindex.sh \
+            files/merlin-hooks.sh files/firewall.sh files/S60tailscaled \
+            build/postinst.in build/prerm.in build/postrm.in \
+            tests/hooks_test.sh
+
+      - name: Parse check
+        run: |
+          for f in install.sh build/*.sh files/*.sh files/S60tailscaled \
+                   build/postinst.in build/prerm.in build/postrm.in tests/*.sh; do
+            sh -n "$f" || exit 1
+          done
+
+      - name: Merlin hook tests
+        run: sh tests/hooks_test.sh
+
+      - name: Package a dummy ipk and verify its structure
+        run: |
+          mkdir -p out
+          printf '#!/bin/sh\necho stub\n' > out/tailscaled
+          chmod +x out/tailscaled
+          ./build/mkipk.sh 0.0.0 1
+          . ./.config/tailscale-version
+          ipk=$(ls out/*.ipk)
+          # Entware ipk == gzip'd tar, not ar. Member order matches the one
+          # Entware's own packages use.
+          test "$(tar -tzf "$ipk" | tr '\n' ' ')" = "./debian-binary ./data.tar.gz ./control.tar.gz "
+          test "$(tar -xzOf "$ipk" ./debian-binary)" = "2.0"
+          tar -xzOf "$ipk" ./data.tar.gz | tar -tzf - | grep -qx './opt/etc/init.d/S60tailscaled'
+          tar -xzOf "$ipk" ./data.tar.gz | tar -tvzf - | grep -q 'root/root\|0/0'
+          tar -xzOf "$ipk" ./control.tar.gz | tar -xzOf - ./control | tee /dev/stderr \
+            | grep -qx "Architecture: $ENTWARE_ARCH"
+          tar -xzOf "$ipk" ./control.tar.gz | tar -xzOf - ./conffiles \
+            | grep -qx '/opt/etc/tailscale/tailscaled.conf'
+          ./build/mkindex.sh out
+          grep -q '^SHA256sum: ' out/Packages
+          grep -q '^Filename: ' out/Packages

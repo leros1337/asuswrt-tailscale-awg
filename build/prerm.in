@@ -1,0 +1,10 @@
+#!/bin/sh
+# Entware opkg prerm.
+[ -n "${IPKG_INSTROOT:-}" ] && exit 0
+
+[ -x /opt/etc/init.d/S60tailscaled ] && /opt/etc/init.d/S60tailscaled stop >/dev/null 2>&1
+[ -x /opt/etc/tailscale/firewall.sh ] && /opt/etc/tailscale/firewall.sh remove >/dev/null 2>&1
+# Drops tailscale's ip rules, routing table 52 and any netfilter remnants.
+[ -x /opt/sbin/tailscaled ] && /opt/sbin/tailscaled --cleanup >/dev/null 2>&1
+
+exit 0

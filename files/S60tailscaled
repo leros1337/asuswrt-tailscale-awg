@@ -1,0 +1,167 @@
+#!/bin/sh
+# Entware init script for tailscaled on Asuswrt-Merlin.
+#
+# IMPORTANT: rc.unslung *sources* every /opt/etc/init.d/S* script rather than
+# forking it (`. $i $ACTION $CALLER`). So this file must never call `exit` --
+# that would abort Entware's whole startup loop and silently stop every service
+# after this one. Return codes only.
+#
+# It also cannot rely on the tools an OpenWrt/Debian init script would assume:
+# Merlin's firmware has no `start-stop-daemon`, no `install` and no `sysctl`,
+# and its busybox has no `command` builtin. Everything below is written against
+# what the router actually ships.
+
+ENABLED=yes
+PROCS=tailscaled
+DESC="Tailscale (AmneziaWG) daemon"
+
+# The firmware's iptables/ip must win over Entware's: Entware's netfilter
+# userspace can be built against a different kernel than the firmware's.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/opt/sbin:/opt/bin
+export PATH
+
+STATE_DIR=/opt/var/lib/tailscale
+LOGFILE=/opt/var/log/tailscaled.log
+LOG_MAX_BYTES=2097152
+SOCKET=/var/run/tailscale/tailscaled.sock
+PIDFILE=/var/run/tailscaled.pid
+PORT=41641
+TUN=tailscale0
+EXTRA_ARGS=""
+
+[ -f /opt/etc/tailscale/tailscaled.conf ] && . /opt/etc/tailscale/tailscaled.conf
+
+# Asuswrt-Merlin 3006 ships iptables-legacy userspace and no usable nft, so pin
+# the mode instead of letting tailscaled probe its way into nftables.
+# Confirmed on RT-BE92U: iptables v1.4.21.
+TS_DEBUG_FIREWALL_MODE=iptables
+export TS_DEBUG_FIREWALL_MODE
+
+# The CGO-free binary looks for a CA bundle on disk. Merlin ships one; Entware's
+# ca-certificates is the other candidate.
+for _ca in /opt/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt; do
+	if [ -f "$_ca" ]; then
+		SSL_CERT_FILE=$_ca
+		export SSL_CERT_FILE
+		break
+	fi
+done
+
+# NOTE: netfilter-mode is a `tailscale up` *preference*, not a tailscaled flag
+# -- passing it here makes the daemon exit with "flag provided but not defined".
+# install.sh sets it during `tailscale up`, and it then persists in the state.
+ARGS="--state=$STATE_DIR/tailscaled.state \
+--statedir=$STATE_DIR \
+--socket=$SOCKET \
+--tun=$TUN \
+--port=$PORT \
+--no-logs-no-support \
+$EXTRA_ARGS"
+
+# No sysctl binary on Merlin -- write /proc directly.
+ts_sysctl() {
+	[ -w "$1" ] && echo "$2" > "$1" 2>/dev/null
+	return 0
+}
+
+ts_prepare() {
+	mkdir -p "$STATE_DIR" "$(dirname "$LOGFILE")" /var/run/tailscale
+	chmod 0700 "$STATE_DIR"
+
+	# tun is a loadable module on Merlin (not built in) and is not loaded by
+	# default; /dev/net/tun only appears after this.
+	[ -c /dev/net/tun ] || { mkdir -p /dev/net; modprobe tun 2>/dev/null; }
+
+	ts_sysctl /proc/sys/net/ipv4/ip_forward 1
+	ts_sysctl /proc/sys/net/ipv6/conf/all/forwarding 1
+	# 0 means no source validation at all, which is already permissive enough;
+	# only relax the strict setting, never tighten a disabled one.
+	if [ "$(cat /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null)" = 1 ]; then
+		ts_sysctl /proc/sys/net/ipv4/conf/all/rp_filter 2
+	fi
+
+	if [ -f "$LOGFILE" ] && [ "$(wc -c < "$LOGFILE")" -gt "$LOG_MAX_BYTES" ]; then
+		mv -f "$LOGFILE" "$LOGFILE.1"
+	fi
+	return 0
+}
+
+# Runs in the background: rc.unslung sources this script during boot, so
+# blocking here would stall every Entware service started after us.
+ts_post_start() {
+	(
+		i=0
+		while [ "$i" -lt 30 ] && [ ! -S "$SOCKET" ]; do
+			sleep 1
+			i=$((i + 1))
+		done
+		[ -x /opt/etc/tailscale/firewall.sh ] && /opt/etc/tailscale/firewall.sh apply
+	) >/dev/null 2>&1 &
+	return 0
+}
+
+start() {
+	if [ "$ENABLED" != "yes" ]; then
+		echo "$DESC is disabled in $0"
+		return 1
+	fi
+	if pidof "$PROCS" >/dev/null 2>&1; then
+		echo "$DESC already running"
+		return 0
+	fi
+	ts_prepare
+	printf 'Starting %s... ' "$DESC"
+	# No start-stop-daemon on this firmware. Exec through a shell so the log
+	# redirection applies to tailscaled itself and $! stays its real pid.
+	#
+	# /bin/sh is spelled out on purpose: ASUSWRT ships a Broadcom memory-access
+	# tool at /usr/sbin/sh (the dw/dh/db/sw/sh/sb family), and $PATH above puts
+	# /usr/sbin first so the firmware's iptables wins. A bare `sh -c` here runs
+	# that tool and the daemon never starts.
+	/bin/sh -c "exec /opt/sbin/tailscaled $ARGS >>$LOGFILE 2>&1" &
+	echo $! > "$PIDFILE"
+	sleep 2
+	if pidof "$PROCS" >/dev/null 2>&1; then
+		echo "done."
+		ts_post_start
+		return 0
+	fi
+	echo "failed. See $LOGFILE"
+	return 1
+}
+
+stop() {
+	printf 'Stopping %s... ' "$DESC"
+	[ -x /opt/etc/tailscale/firewall.sh ] && \
+		/opt/etc/tailscale/firewall.sh remove >/dev/null 2>&1
+	killall "$PROCS" 2>/dev/null
+	i=0
+	while [ "$i" -lt 10 ] && pidof "$PROCS" >/dev/null 2>&1; do
+		sleep 1
+		i=$((i + 1))
+	done
+	pidof "$PROCS" >/dev/null 2>&1 && killall -9 "$PROCS" 2>/dev/null
+	rm -f "$PIDFILE"
+	echo "done."
+	return 0
+}
+
+check() {
+	if pidof "$PROCS" >/dev/null 2>&1; then
+		echo "$DESC is running (pid $(pidof "$PROCS"))"
+		return 0
+	fi
+	echo "$DESC is not running"
+	return 1
+}
+
+# rc.unslung calls us as `. S60tailscaled <action> <caller>`; an unknown action
+# must not be fatal, because we are running inside its shell.
+case "${1:-start}" in
+	start)        start ;;
+	stop|kill)    stop ;;
+	restart)      stop; sleep 1; start ;;
+	check|status) check ;;
+	reconfigure)  killall -HUP "$PROCS" 2>/dev/null; true ;;
+	*)            echo "usage: $0 start|stop|restart|check" ;;
+esac

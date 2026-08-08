@@ -1,0 +1,160 @@
+name: Build (Asuswrt-Merlin / Entware)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [build-asuswrt]
+  push:
+    branches: [main]
+    paths:
+      - '.config/tailscale-version'
+      - 'build/**'
+      - 'files/**'
+      - '.github/workflows/build-asuswrt.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Cross-build aarch64 + package
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pin.outputs.version }}
+      arch: ${{ steps.pin.outputs.arch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version pin
+        id: pin
+        run: |
+          . ./.config/tailscale-version
+          {
+            echo "version=$TAILSCALE_VERSION"
+            echo "tag=$TAILSCALE_TAG"
+            echo "repo=$TAILSCALE_REPO"
+            echo "release=$PKG_RELEASE"
+            echo "arch=$ENTWARE_ARCH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tailscale (AmneziaWG fork)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.pin.outputs.repo }}
+          ref: ${{ steps.pin.outputs.tag }}
+          path: src
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: Install UPX
+        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+
+      - name: Build
+        run: ./build/build.sh
+
+      - name: Package .ipk
+        run: |
+          ./build/mkipk.sh "${{ steps.pin.outputs.version }}" "${{ steps.pin.outputs.release }}"
+          sha256sum out/tailscaled > out/tailscaled.sha256
+          sha256sum out/tailscaled.raw > out/tailscaled.raw.sha256
+          printf '%s\n' "${{ steps.pin.outputs.version }}" > out/version
+
+      - name: Generate opkg index
+        run: ./build/mkindex.sh out
+
+      - name: Verify ipk structure
+        run: |
+          # An Entware ipk is a gzip'd tar of ./debian-binary + ./data.tar.gz +
+          # ./control.tar.gz -- NOT an ar archive. opkg rejects ar outright.
+          ipk=$(ls out/*.ipk)
+          test "$(tar -tzf "$ipk" | tr '\n' ' ')" = "./debian-binary ./data.tar.gz ./control.tar.gz "
+          test "$(tar -xzOf "$ipk" ./debian-binary)" = "2.0"
+          tar -xzOf "$ipk" ./data.tar.gz    | tar -tzf - | grep -qx './opt/sbin/tailscaled'
+          tar -xzOf "$ipk" ./control.tar.gz | tar -xzOf - ./control \
+            | grep -qx "Architecture: ${{ steps.pin.outputs.arch }}"
+
+      - name: Smoke-test the binary under qemu
+        run: |
+          sudo apt-get install -y qemu-user-static
+          # The uncompressed binary is the gate; UPX self-extraction under
+          # qemu-user is unreliable, so `upx -t` in build.sh covers that one.
+          qemu-aarch64-static out/tailscaled.raw --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-awg-${{ steps.pin.outputs.arch }}
+          path: out/
+          retention-days: 14
+
+  deploy-feed:
+    name: Publish opkg feed
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tailscale-awg-${{ needs.build.outputs.arch }}
+          path: artifact
+
+      - name: Assemble feed branch
+        run: |
+          rm -rf feed && mkdir -p "feed/${{ needs.build.outputs.arch }}"
+          cp -a feed_template/. feed/
+          cp install.sh feed/install.sh
+          cp artifact/*.ipk artifact/*.sha256 artifact/Packages artifact/Packages.gz \
+             artifact/tailscaled artifact/tailscaled.raw "feed/${{ needs.build.outputs.arch }}/"
+          cp artifact/version feed/latest
+          touch feed/.nojekyll
+          sed -i "s/@VERSION@/${{ needs.build.outputs.version }}/g; s/@ARCH@/${{ needs.build.outputs.arch }}/g" \
+            feed/index.html
+
+      - name: Force-push feed branch
+        run: |
+          cd feed
+          git init -q -b feed
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "feed: tailscale ${{ needs.build.outputs.version }}"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" feed:feed
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tailscale-awg-${{ needs.build.outputs.arch }}
+          path: artifact
+
+      - name: Release notes
+        run: |
+          cat > notes.md <<EOF
+          Tailscale **${{ needs.build.outputs.version }}** with AmneziaWG support, for
+          **Asuswrt-Merlin 3006+ / aarch64** via Entware.
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh -o /tmp/ts-install.sh
+          sh /tmp/ts-install.sh install
+          \`\`\`
+
+          Artifacts:
+          - \`tailscale_${{ needs.build.outputs.version }}-1_${{ needs.build.outputs.arch }}.ipk\` — the package (UPX-compressed binary)
+          - \`tailscaled.raw\` — uncompressed binary, for \`install.sh --direct --no-upx\` if UPX misbehaves
+          EOF
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: v${{ needs.build.outputs.version }}
+          body_path: notes.md
+          files: |
+            artifact/*.ipk
+            artifact/*.sha256
+            artifact/tailscaled
+            artifact/tailscaled.raw
