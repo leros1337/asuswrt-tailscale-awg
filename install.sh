@@ -39,6 +39,7 @@ PURGE=0
 AUTHKEY=${TS_AUTHKEY:-}
 ROUTES=
 PIN_VERSION=
+LOG_LINES=100
 
 # ---------------------------------------------------------------- output ----
 
@@ -72,7 +73,7 @@ commands:
   uninstall   remove the package, hooks and firewall rules
   status      report firmware, Entware, package, service and rule state
   repair      reinstall the /jffs hooks (use after a factory reset)
-  logs        tail $LOGFILE
+  logs        tail $LOGFILE (see --lines)
 
 options:
   --yes                    do not prompt
@@ -85,6 +86,7 @@ options:
   --no-upx                 install the uncompressed binary (--direct only)
   --purge                  on uninstall, also delete the node identity in
                            /opt/var/lib/tailscale (irreversible)
+  --lines N                how many log lines the logs command shows (default 100)
   --set-jffs               set nvram jffs2_scripts=1 for me (needs a reboot)
   --assume-entware         skip the Entware-on-USB checks (CI/testing)
 EOF
@@ -496,7 +498,7 @@ cmd_status() {
 
 cmd_logs() {
 	[ -f "$LOGFILE" ] || die "$LOGFILE does not exist yet."
-	tail -n "${1:-100}" "$LOGFILE"
+	tail -n "$LOG_LINES" "$LOGFILE"
 }
 
 # ----------------------------------------------------------------- main ----
@@ -511,6 +513,8 @@ while [ $# -gt 0 ]; do
 		--direct)          DIRECT=1 ;;
 		--no-upx)          NO_UPX=1 ;;
 		--purge)           PURGE=1 ;;
+		--lines)           shift; LOG_LINES=${1:-100} ;;
+		--lines=*)         LOG_LINES=${1#--lines=} ;;
 		--accept-dns)      ACCEPT_DNS=1 ;;
 		--exit-node)       EXIT_NODE=1 ;;
 		--authkey)         shift; AUTHKEY=${1:-} ;;
