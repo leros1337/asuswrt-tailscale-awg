@@ -121,6 +121,31 @@ If forwarding works in one direction only, Broadcom's flow accelerator is probab
 
 This package deliberately does not shadow `/etc/init.d` to satisfy that lookup: on ASUSWRT it is a read-only symlink to `/rom/etc/init.d`, which holds the firmware's wlan-driver, nvram and mount-fs boot scripts. Masking that directory to save one command is not a trade worth making.
 
+## Reaching the router's web UI over Tailscale
+
+`https://<tailnet-ip>:8443` does **not** work, and no firewall rule will fix it. ASUSWRT's `httpd` binds to specific addresses only — `127.0.0.1` and the LAN IP — never `0.0.0.0`, so nothing is listening on the Tailscale address:
+
+```
+tcp  0  0 127.0.0.1:8443    LISTEN
+tcp  0  0 192.168.1.1:8443  LISTEN     <- LAN only
+```
+
+Use `tailscale serve` to proxy it from inside tailscaled:
+
+```sh
+tailscale serve --bg --http=80 https+insecure://192.168.1.1:8443
+```
+
+Then open `http://<hostname>/` from any tailnet device. Plain HTTP is fine here — the traffic is inside the WireGuard tunnel. `https+insecure://` is required because the router's own certificate is self-signed.
+
+For `https://` with a real certificate, enable **HTTPS Certificates** at *login.tailscale.com/admin/dns* first, then:
+
+```sh
+tailscale serve --bg --https=443 https+insecure://192.168.1.1:8443
+```
+
+Without that setting the daemon logs `your Tailscale account does not support getting TLS certs` and the TLS handshake fails. Two client-side gotchas: `serve` routes on the Host header, so requesting the bare IP returns `404` — use the MagicDNS name; and the client needs `--accept-dns=true` to resolve that name. The serve config lives in `tailscaled.state`, so it survives reboots.
+
 ## DNS / MagicDNS
 
 MagicDNS is **off by default** (`--accept-dns=false`). `/etc/resolv.conf` on Merlin is a tmpfs file that dnsmasq rewrites on every WAN event, so letting tailscaled manage it produces a fight that dnsmasq wins.
@@ -149,6 +174,7 @@ service restart_dnsmasq
 | nothing after a reboot | `nvram get jffs2_scripts` must be `1`; the USB drive must be attached at boot |
 | TLS / certificate errors | `opkg install ca-certificates` |
 | `opkg` refuses the package | compare `opkg print-architecture` with `ENTWARE_ARCH` in `.config/tailscale-version` |
+| router UI unreachable on the tailnet IP | expected — `httpd` binds to the LAN IP only. See *Reaching the router's web UI over Tailscale* |
 
 ## Building
 
