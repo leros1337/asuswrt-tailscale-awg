@@ -1,0 +1,25 @@
+Package: tailscale
+Version: 1.104.1-2
+Suggests: ca-certificates
+Provides: tailscaled
+Section: net
+Architecture: aarch64-3.10
+Installed-Size: 7753728
+Maintainer: leros1337 <https://github.com/leros1337>
+Source: https://github.com/leros1337/asuswrt-tailscale-awg
+License: BSD-3-Clause
+Homepage: https://tailscale.com
+Description: Tailscale with AmneziaWG support, for Asuswrt-Merlin via Entware.
+ Static aarch64 build of tailscaled with the CLI embedded (ts_include_cli).
+ Requires Asuswrt-Merlin 3006 or newer, an Entware installation on USB, and
+ JFFS custom scripts enabled. Deliberately does NOT depend on libc (the binary
+ is CGO-free and static), on kmod-tun (TUN is compiled into the firmware
+ kernel), or on Entware's iptables (whose netfilter version can mismatch the
+ firmware kernel -- the firmware's /usr/sbin/iptables is used instead).
+ ca-certificates is only suggested: Merlin 3006 ships
+ /etc/ssl/certs/ca-certificates.crt, which the init script falls back to.
+Filename: tailscale_1.104.1-2_aarch64-3.10.ipk
+Size: 7695944
+SHA256sum: c031ca7a41e35da5d3bc76dfa799ab26a23ea1c5930a83717babe92ebc9b8f6e
+MD5Sum: 9a37a656da7949fd782435cbe5b5c898
+
