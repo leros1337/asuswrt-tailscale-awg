@@ -1,9 +1,9 @@
 # Version pin for the AmneziaWG-enabled Tailscale fork we build.
 # Sourced by build/*.sh and rewritten by .github/workflows/check-version.yml.
 TAILSCALE_REPO=LiuTangLei/tailscale
-TAILSCALE_VERSION=1.104.1
-TAILSCALE_TAG=v1.104.1
-UPSTREAM_COMMIT=411ee6685253069b5a3b496ab14c98e5b2f82afb
+TAILSCALE_VERSION=1.104.2
+TAILSCALE_TAG=v1.104.2
+UPSTREAM_COMMIT=d7efe75c7cce10651036bda98145e550ce0986ff
 PKG_RELEASE=2
 
 # Entware target architecture. Must match `opkg print-architecture` on the
